@@ -11,7 +11,7 @@ from app.file_manager import FileManager
 
 
 async def setup_bot(config):
-    db = Database(config.database_path)
+    db = Database(config.turso_url, config.turso_token)
     await db.connect()
 
     whitelist = WhitelistRepo(db)
