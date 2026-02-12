@@ -21,6 +21,11 @@ router = Router(name="files")
 
 _pending = {}
 _semaphore = asyncio.Semaphore(2)
+_waiting_resize = {}
+_waiting_password = {}
+_waiting_unlock = {}
+_waiting_pages = {}
+_merge_queue = {}
 
 
 def _keyboard(category):
@@ -71,6 +76,19 @@ def _keyboard(category):
             [InlineKeyboardButton(text="📝 Extract Text", callback_data="pdf_text")],
             [InlineKeyboardButton(text="🖼 Extract Images", callback_data="pdf_imgs")],
             [InlineKeyboardButton(text="✂️ Split Pages", callback_data="pdf_split")],
+            [InlineKeyboardButton(text="📊 PDF Info", callback_data="pdf_info")],
+            [InlineKeyboardButton(text="🗜 Compress PDF", callback_data="pdf_compress")],
+            [
+                InlineKeyboardButton(text="🖼 PDF → Images", callback_data="pdf_to_img"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Rotate 90°", callback_data="pdf_rot90"),
+                InlineKeyboardButton(text="🔄 Rotate 180°", callback_data="pdf_rot180"),
+            ],
+            [InlineKeyboardButton(text="📄 Extract Pages", callback_data="pdf_extract_pages")],
+            [InlineKeyboardButton(text="🔒 Password Protect", callback_data="pdf_protect")],
+            [InlineKeyboardButton(text="🔓 Remove Password", callback_data="pdf_unlock")],
+            [InlineKeyboardButton(text="📎 Merge PDFs (start)", callback_data="pdf_merge_start")],
             [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel")],
         ],
         "docx": [
@@ -87,10 +105,6 @@ def _keyboard(category):
     )
 
 
-# Store for custom resize waiting
-_waiting_resize = {}
-
-
 def register_file_handlers(rt, config, fm, usage, bot):
     img = ImageService()
     pdf = PDFService()
@@ -99,18 +113,12 @@ def register_file_handlers(rt, config, fm, usage, bot):
     @rt.message(F.photo)
     async def on_photo(message: Message):
         user_id = message.from_user.id
-
-        # Check if waiting for custom resize input
-        if user_id in _waiting_resize:
+        if user_id in _waiting_resize or user_id in _waiting_password or user_id in _waiting_unlock or user_id in _waiting_pages:
             return
-
         photo = message.photo[-1]
         if photo.file_size and photo.file_size > config.max_file_size_bytes:
-            max_mb = config.max_file_size_mb
-            actual = round(photo.file_size / (1024 * 1024), 2)
-            await message.reply(f"❌ Photo too large: {actual}MB (max {max_mb}MB)")
+            await message.reply(f"❌ Photo too large (max {config.max_file_size_mb}MB)")
             return
-
         _pending[user_id] = {
             "file_id": photo.file_id,
             "file_name": "photo.jpg",
@@ -118,13 +126,10 @@ def register_file_handlers(rt, config, fm, usage, bot):
             "mime_type": "image/jpeg",
             "category": "image",
         }
-
         size_str = format_size(photo.file_size or 0)
         await message.reply(
-            f"🖼 Photo received!\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 Size: {size_str}\n"
-            f"⚠️ Tip: Send as File for full quality\n\n"
+            f"🖼 Photo received! ({size_str})\n"
+            f"⚠️ Send as File for full quality\n\n"
             f"Choose operation:",
             reply_markup=_keyboard("image"),
         )
@@ -134,17 +139,33 @@ def register_file_handlers(rt, config, fm, usage, bot):
         doc = message.document
         user_id = message.from_user.id
 
-        if doc.file_size and doc.file_size > config.max_file_size_bytes:
-            max_mb = config.max_file_size_mb
-            actual = round(doc.file_size / (1024 * 1024), 2)
-            await message.reply(f"❌ File too large: {actual}MB (max {max_mb}MB)")
+        # Check if collecting PDFs for merge
+        if user_id in _merge_queue:
+            if doc.mime_type == "application/pdf":
+                path = fm.temp_path(".pdf")
+                tg_file = await bot.get_file(doc.file_id)
+                await bot.download_file(tg_file.file_path, destination=str(path))
+                _merge_queue[user_id]["files"].append(path)
+                count = len(_merge_queue[user_id]["files"])
+                await message.reply(
+                    f"📎 PDF #{count} added!\n\n"
+                    f"Send more PDFs or click Done:",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=f"✅ Merge {count} PDFs", callback_data="pdf_merge_done")],
+                        [InlineKeyboardButton(text="❌ Cancel", callback_data="pdf_merge_cancel")],
+                    ]),
+                )
+            else:
+                await message.reply("❌ Only PDF files for merge. Send a PDF or click Done.")
             return
 
+        if doc.file_size and doc.file_size > config.max_file_size_bytes:
+            await message.reply(f"❌ File too large (max {config.max_file_size_mb}MB)")
+            return
         category = detect_category(doc.mime_type)
         if not category:
-            await message.reply(f"❌ Unsupported type: {doc.mime_type}\nSupported: image, pdf, docx")
+            await message.reply(f"❌ Unsupported: {doc.mime_type}\nSupported: image, pdf, docx")
             return
-
         _pending[user_id] = {
             "file_id": doc.file_id,
             "file_name": doc.file_name or "file",
@@ -152,7 +173,6 @@ def register_file_handlers(rt, config, fm, usage, bot):
             "mime_type": doc.mime_type,
             "category": category,
         }
-
         size_str = format_size(doc.file_size or 0)
         await message.reply(
             f"📁 File received!\n"
@@ -164,253 +184,310 @@ def register_file_handlers(rt, config, fm, usage, bot):
             reply_markup=_keyboard(category),
         )
 
-    # Handle custom resize text input
     @rt.message(F.text)
     async def on_text(message: Message):
         user_id = message.from_user.id
-        if user_id not in _waiting_resize:
+        text = message.text.strip()
+
+        # Custom resize input
+        if user_id in _waiting_resize:
+            data = _waiting_resize.pop(user_id)
+            try:
+                if "x" in text.lower():
+                    parts = text.lower().split("x")
+                    w = int(parts[0].strip())
+                    h = int(parts[1].strip())
+                    if w < 1 or h < 1 or w > 10000 or h > 10000:
+                        await message.reply("❌ Size must be 1-10000")
+                        return
+                    await _do_resize_exact(message, bot, config, fm, usage, data, w, h)
+                else:
+                    pct = int(text)
+                    if pct < 1 or pct > 500:
+                        await message.reply("❌ Percentage must be 1-500")
+                        return
+                    await _do_resize_pct(message, bot, config, fm, usage, data, pct)
+            except ValueError:
+                await message.reply("❌ Invalid. Use '50' or '800x600'")
             return
 
-        text = message.text.strip()
-        data = _waiting_resize.pop(user_id)
+        # Password protect input
+        if user_id in _waiting_password:
+            data = _waiting_password.pop(user_id)
+            if len(text) < 1:
+                await message.reply("❌ Password cannot be empty")
+                return
+            await _do_protect(message, bot, fm, usage, data, text)
+            return
 
-        # Parse input: "50" or "800x600"
-        try:
-            if "x" in text.lower():
-                parts = text.lower().split("x")
-                width = int(parts[0].strip())
-                height = int(parts[1].strip())
-                if width < 1 or height < 1 or width > 10000 or height > 10000:
-                    await message.reply("❌ Dimensions must be 1-10000. Try again.")
-                    return
-                # Exact resize
-                await _do_custom_resize_exact(message, bot, config, fm, usage, data, width, height)
-            else:
-                pct = int(text)
-                if pct < 1 or pct > 500:
-                    await message.reply("❌ Percentage must be 1-500. Try again.")
-                    return
-                await _do_custom_resize_pct(message, bot, config, fm, usage, data, pct)
-        except ValueError:
-            await message.reply("❌ Invalid format. Use '50' for 50% or '800x600' for exact size.")
+        # Password unlock input
+        if user_id in _waiting_unlock:
+            data = _waiting_unlock.pop(user_id)
+            await _do_unlock(message, bot, fm, usage, data, text)
+            return
+
+        # Page range input
+        if user_id in _waiting_pages:
+            data = _waiting_pages.pop(user_id)
+            try:
+                if "-" in text:
+                    parts = text.split("-")
+                    start = int(parts[0].strip())
+                    end = int(parts[1].strip())
+                else:
+                    start = int(text)
+                    end = start
+                await _do_extract_pages(message, bot, fm, usage, data, start, end)
+            except ValueError:
+                await message.reply("❌ Invalid. Use '3' or '2-5'")
+            return
 
     @rt.callback_query(F.data == "cancel")
     async def on_cancel(cb: CallbackQuery):
-        _pending.pop(cb.from_user.id, None)
-        _waiting_resize.pop(cb.from_user.id, None)
+        uid = cb.from_user.id
+        _pending.pop(uid, None)
+        _waiting_resize.pop(uid, None)
+        _waiting_password.pop(uid, None)
+        _waiting_unlock.pop(uid, None)
+        _waiting_pages.pop(uid, None)
+        if uid in _merge_queue:
+            for f in _merge_queue[uid].get("files", []):
+                fm.cleanup(f)
+            _merge_queue.pop(uid, None)
         await cb.message.edit_text("❌ Cancelled.")
         await cb.answer()
 
-    # ── Original handlers ──
+    # ── Image handlers ──
     @rt.callback_query(F.data == "img_meta")
-    async def h1(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "remove_metadata",
-                  lambda i, o: img.remove_metadata(i, o))
-
+    async def h1(cb): await _do(cb, bot, config, fm, usage, "image", "remove_metadata", lambda i, o: img.remove_metadata(i, o))
     @rt.callback_query(F.data == "img_r50")
-    async def h2(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "resize_50",
-                  lambda i, o: img.resize(i, o, 50))
-
+    async def h2(cb): await _do(cb, bot, config, fm, usage, "image", "resize_50", lambda i, o: img.resize(i, o, 50))
     @rt.callback_query(F.data == "img_r25")
-    async def h3(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "resize_25",
-                  lambda i, o: img.resize(i, o, 25))
-
+    async def h3(cb): await _do(cb, bot, config, fm, usage, "image", "resize_25", lambda i, o: img.resize(i, o, 25))
     @rt.callback_query(F.data == "img_png")
-    async def h4(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "to_png",
-                  lambda i, o: img.convert(i, o, "PNG"), out_ext=".png")
-
+    async def h4(cb): await _do(cb, bot, config, fm, usage, "image", "to_png", lambda i, o: img.convert(i, o, "PNG"), out_ext=".png")
     @rt.callback_query(F.data == "img_jpg")
-    async def h5(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "to_jpg",
-                  lambda i, o: img.convert(i, o, "JPEG"), out_ext=".jpg")
-
+    async def h5(cb): await _do(cb, bot, config, fm, usage, "image", "to_jpg", lambda i, o: img.convert(i, o, "JPEG"), out_ext=".jpg")
     @rt.callback_query(F.data == "img_webp")
-    async def h6(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "to_webp",
-                  lambda i, o: img.convert(i, o, "WEBP"), out_ext=".webp")
-
-    # ── New handlers ──
-
-    # Custom resize
+    async def h6(cb): await _do(cb, bot, config, fm, usage, "image", "to_webp", lambda i, o: img.convert(i, o, "WEBP"), out_ext=".webp")
     @rt.callback_query(F.data == "img_rcustom")
-    async def h_rcustom(cb: CallbackQuery):
+    async def h_rc(cb: CallbackQuery):
         uid = cb.from_user.id
         data = _pending.get(uid)
         if not data:
             await cb.answer("❌ No file pending.", show_alert=True)
             return
         _waiting_resize[uid] = data
-        await cb.message.edit_text(
-            "📐 Custom Resize\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Send me one of these:\n\n"
-            "• A number for percentage: 75\n"
-            "• Exact dimensions: 800x600\n\n"
-            "Type and send:"
-        )
+        await cb.message.edit_text("📐 Send size:\n\n• Percentage: 75\n• Exact: 800x600")
         await cb.answer()
-
-    # Compress
     @rt.callback_query(F.data == "img_comp_low")
-    async def h_cl(cb: CallbackQuery):
-        await _do_compress(cb, bot, config, fm, usage, img, "low")
-
+    async def hcl(cb): await _do_compress(cb, bot, config, fm, usage, img, "low")
     @rt.callback_query(F.data == "img_comp_med")
-    async def h_cm(cb: CallbackQuery):
-        await _do_compress(cb, bot, config, fm, usage, img, "medium")
-
+    async def hcm(cb): await _do_compress(cb, bot, config, fm, usage, img, "medium")
     @rt.callback_query(F.data == "img_comp_high")
-    async def h_ch(cb: CallbackQuery):
-        await _do_compress(cb, bot, config, fm, usage, img, "high")
-
-    # Grayscale
+    async def hch(cb): await _do_compress(cb, bot, config, fm, usage, img, "high")
     @rt.callback_query(F.data == "img_gray")
-    async def h_gray(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "grayscale",
-                  lambda i, o: img.grayscale(i, o))
-
-    # Info
+    async def hg(cb): await _do(cb, bot, config, fm, usage, "image", "grayscale", lambda i, o: img.grayscale(i, o))
     @rt.callback_query(F.data == "img_info")
-    async def h_info(cb: CallbackQuery):
-        await _do_info(cb, bot, fm, usage, img)
-
-    # Blur
+    async def hi(cb): await _do_img_info(cb, bot, fm, usage, img)
     @rt.callback_query(F.data == "img_blur_light")
-    async def h_bl(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "blur_light",
-                  lambda i, o: img.blur(i, o, "light"))
-
+    async def hbl(cb): await _do(cb, bot, config, fm, usage, "image", "blur_light", lambda i, o: img.blur(i, o, "light"))
     @rt.callback_query(F.data == "img_blur_med")
-    async def h_bm(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "blur_medium",
-                  lambda i, o: img.blur(i, o, "medium"))
-
+    async def hbm(cb): await _do(cb, bot, config, fm, usage, "image", "blur_medium", lambda i, o: img.blur(i, o, "medium"))
     @rt.callback_query(F.data == "img_blur_heavy")
-    async def h_bh(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "blur_heavy",
-                  lambda i, o: img.blur(i, o, "heavy"))
-
-    # Upscale
+    async def hbh(cb): await _do(cb, bot, config, fm, usage, "image", "blur_heavy", lambda i, o: img.blur(i, o, "heavy"))
     @rt.callback_query(F.data == "img_up2")
-    async def h_u2(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "upscale_2x",
-                  lambda i, o: img.upscale(i, o, 2))
-
+    async def hu2(cb): await _do(cb, bot, config, fm, usage, "image", "upscale_2x", lambda i, o: img.upscale(i, o, 2))
     @rt.callback_query(F.data == "img_up4")
-    async def h_u4(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "upscale_4x",
-                  lambda i, o: img.upscale(i, o, 4))
-
-    # Image to PDF
+    async def hu4(cb): await _do(cb, bot, config, fm, usage, "image", "upscale_4x", lambda i, o: img.upscale(i, o, 4))
     @rt.callback_query(F.data == "img_pdf")
-    async def h_pdf(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "to_pdf",
-                  lambda i, o: img.to_pdf(i, o), out_ext=".pdf")
-
-    # Screenshot cleaner
+    async def hipdf(cb): await _do(cb, bot, config, fm, usage, "image", "to_pdf", lambda i, o: img.to_pdf(i, o), out_ext=".pdf")
     @rt.callback_query(F.data == "img_screenshot")
-    async def h_ss(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "clean_screenshot",
-                  lambda i, o: img.clean_screenshot(i, o))
-
-    # ID Photos
+    async def hss(cb): await _do(cb, bot, config, fm, usage, "image", "clean_screenshot", lambda i, o: img.clean_screenshot(i, o))
     @rt.callback_query(F.data == "img_id_passport")
-    async def h_idp(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "id_passport",
-                  lambda i, o: img.id_photo(i, o, "passport"), out_ext=".jpg")
-
+    async def hidp(cb): await _do(cb, bot, config, fm, usage, "image", "id_passport", lambda i, o: img.id_photo(i, o, "passport"), out_ext=".jpg")
     @rt.callback_query(F.data == "img_id_visa")
-    async def h_idv(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "id_visa",
-                  lambda i, o: img.id_photo(i, o, "visa"), out_ext=".jpg")
-
+    async def hidv(cb): await _do(cb, bot, config, fm, usage, "image", "id_visa", lambda i, o: img.id_photo(i, o, "visa"), out_ext=".jpg")
     @rt.callback_query(F.data == "img_id_stamp")
-    async def h_ids(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "image", "id_stamp",
-                  lambda i, o: img.id_photo(i, o, "stamp"), out_ext=".jpg")
+    async def hids(cb): await _do(cb, bot, config, fm, usage, "image", "id_stamp", lambda i, o: img.id_photo(i, o, "stamp"), out_ext=".jpg")
 
     # ── PDF handlers ──
     @rt.callback_query(F.data == "pdf_meta")
-    async def h7(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "pdf", "remove_metadata",
-                  lambda i, o: pdf.remove_metadata(i, o), out_ext=".pdf")
-
+    async def p1(cb): await _do(cb, bot, config, fm, usage, "pdf", "remove_metadata", lambda i, o: pdf.remove_metadata(i, o), out_ext=".pdf")
     @rt.callback_query(F.data == "pdf_text")
-    async def h8(cb: CallbackQuery):
-        await _do_text(cb, bot, fm, usage, "pdf", "extract_text",
-                       lambda i: pdf.extract_text(i), in_ext=".pdf")
-
+    async def p2(cb): await _do_text(cb, bot, fm, usage, "pdf", "extract_text", lambda i: pdf.extract_text(i), in_ext=".pdf")
     @rt.callback_query(F.data == "pdf_imgs")
-    async def h9(cb: CallbackQuery):
-        await _do_multi(cb, bot, fm, usage)
-
+    async def p3(cb): await _do_multi(cb, bot, fm, usage, pdf)
     @rt.callback_query(F.data == "pdf_split")
-    async def h10(cb: CallbackQuery):
-        await _do_split(cb, bot, fm, usage)
+    async def p4(cb): await _do_split(cb, bot, fm, usage, pdf)
+
+    @rt.callback_query(F.data == "pdf_info")
+    async def p5(cb): await _do_pdf_info(cb, bot, fm, usage, pdf)
+
+    @rt.callback_query(F.data == "pdf_compress")
+    async def p6(cb): await _do_pdf_compress(cb, bot, fm, usage, pdf)
+
+    @rt.callback_query(F.data == "pdf_to_img")
+    async def p7(cb): await _do_pdf_to_images(cb, bot, fm, usage, pdf)
+
+    @rt.callback_query(F.data == "pdf_rot90")
+    async def p8a(cb): await _do(cb, bot, config, fm, usage, "pdf", "rotate_90", lambda i, o: pdf.rotate_pages(i, o, 90), out_ext=".pdf")
+
+    @rt.callback_query(F.data == "pdf_rot180")
+    async def p8b(cb): await _do(cb, bot, config, fm, usage, "pdf", "rotate_180", lambda i, o: pdf.rotate_pages(i, o, 180), out_ext=".pdf")
+
+    @rt.callback_query(F.data == "pdf_extract_pages")
+    async def p9(cb: CallbackQuery):
+        uid = cb.from_user.id
+        data = _pending.get(uid)
+        if not data:
+            await cb.answer("❌ No file pending.", show_alert=True)
+            return
+        _waiting_pages[uid] = data
+        await cb.message.edit_text("📄 Extract Pages\n\nSend page range:\n\n• Single page: 3\n• Range: 2-5")
+        await cb.answer()
+
+    @rt.callback_query(F.data == "pdf_protect")
+    async def p10(cb: CallbackQuery):
+        uid = cb.from_user.id
+        data = _pending.get(uid)
+        if not data:
+            await cb.answer("❌ No file pending.", show_alert=True)
+            return
+        _waiting_password[uid] = data
+        await cb.message.edit_text("🔒 Password Protect\n\nSend the password you want to set:")
+        await cb.answer()
+
+    @rt.callback_query(F.data == "pdf_unlock")
+    async def p11(cb: CallbackQuery):
+        uid = cb.from_user.id
+        data = _pending.get(uid)
+        if not data:
+            await cb.answer("❌ No file pending.", show_alert=True)
+            return
+        _waiting_unlock[uid] = data
+        await cb.message.edit_text("🔓 Remove Password\n\nSend the current password:")
+        await cb.answer()
+
+    @rt.callback_query(F.data == "pdf_merge_start")
+    async def p12(cb: CallbackQuery):
+        uid = cb.from_user.id
+        data = _pending.get(uid)
+        if not data:
+            await cb.answer("❌ No file pending.", show_alert=True)
+            return
+
+        # Download first PDF
+        path = fm.temp_path(".pdf")
+        tg_file = await bot.get_file(data["file_id"])
+        await bot.download_file(tg_file.file_path, destination=str(path))
+
+        _merge_queue[uid] = {"files": [path]}
+        _pending.pop(uid, None)
+
+        await cb.message.edit_text(
+            "📎 Merge PDFs\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "PDF #1 added!\n\n"
+            "Send more PDF files.\n"
+            "Click Done when ready.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Merge 1 PDF", callback_data="pdf_merge_done")],
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="pdf_merge_cancel")],
+            ]),
+        )
+        await cb.answer()
+
+    @rt.callback_query(F.data == "pdf_merge_done")
+    async def p12_done(cb: CallbackQuery):
+        uid = cb.from_user.id
+        if uid not in _merge_queue:
+            await cb.answer("❌ No merge in progress.", show_alert=True)
+            return
+        files = _merge_queue[uid]["files"]
+        if len(files) < 2:
+            await cb.answer("❌ Need at least 2 PDFs.", show_alert=True)
+            return
+        await cb.answer("⏳ Merging...")
+        await cb.message.edit_text(f"⏳ Merging {len(files)} PDFs...")
+        out = None
+        try:
+            async with _semaphore:
+                timer = Timer()
+                out = fm.temp_path(".pdf")
+                with timer:
+                    await pdf.merge(files, out)
+                result = FSInputFile(path=str(out), filename="merged.pdf")
+                await bot.send_document(
+                    chat_id=cb.message.chat.id,
+                    document=result,
+                    caption=f"✅ Merged {len(files)} PDFs ({timer.elapsed_ms}ms)",
+                )
+                await usage.log(uid, "pdf", "merge", 0, "success", "", timer.elapsed_ms)
+                await cb.message.edit_text(f"✅ Merged {len(files)} PDFs! ({timer.elapsed_ms}ms)")
+        except Exception as e:
+            logger.error(f"Merge error: {e}", exc_info=True)
+            await usage.log(uid, "pdf", "merge", 0, "failure", str(e)[:200])
+            await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
+        finally:
+            for f in files:
+                fm.cleanup(f)
+            if out:
+                fm.cleanup(out)
+            _merge_queue.pop(uid, None)
+
+    @rt.callback_query(F.data == "pdf_merge_cancel")
+    async def p12_cancel(cb: CallbackQuery):
+        uid = cb.from_user.id
+        if uid in _merge_queue:
+            for f in _merge_queue[uid].get("files", []):
+                fm.cleanup(f)
+            _merge_queue.pop(uid, None)
+        await cb.message.edit_text("❌ Merge cancelled.")
+        await cb.answer()
 
     # ── DOCX handlers ──
     @rt.callback_query(F.data == "docx_meta")
-    async def h11(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "docx", "remove_metadata",
-                  lambda i, o: docx.remove_metadata(i, o), out_ext=".docx")
-
+    async def d1(cb): await _do(cb, bot, config, fm, usage, "docx", "remove_metadata", lambda i, o: docx.remove_metadata(i, o), out_ext=".docx")
     @rt.callback_query(F.data == "docx_comments")
-    async def h12(cb: CallbackQuery):
-        await _do(cb, bot, config, fm, usage, "docx", "remove_comments",
-                  lambda i, o: docx.remove_comments(i, o), out_ext=".docx")
-
+    async def d2(cb): await _do(cb, bot, config, fm, usage, "docx", "remove_comments", lambda i, o: docx.remove_comments(i, o), out_ext=".docx")
     @rt.callback_query(F.data == "docx_text")
-    async def h13(cb: CallbackQuery):
-        await _do_text(cb, bot, fm, usage, "docx", "extract_text",
-                       lambda i: docx.extract_text(i), in_ext=".docx")
+    async def d3(cb): await _do_text(cb, bot, fm, usage, "docx", "extract_text", lambda i: docx.extract_text(i), in_ext=".docx")
 
 
-# ── Processing Functions ──
+# ── Core processing functions ──
 
 async def _do(cb, bot, config, fm, usage, ftype, tool, process_fn, out_ext=""):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
-        await cb.answer("❌ No file pending. Upload again.", show_alert=True)
+        await cb.answer("❌ No file pending.", show_alert=True)
         return
     await cb.answer("⏳ Processing...")
-    await cb.message.edit_text(f"⏳ Processing {tool}...")
-    inp = None
-    out = None
+    await cb.message.edit_text(f"⏳ {tool}...")
+    inp = out = None
     try:
         async with _semaphore:
             timer = Timer()
             name = data["file_name"]
             in_ext = Path(name).suffix if name else ".jpg"
-            if not out_ext:
-                out_ext = in_ext
+            if not out_ext: out_ext = in_ext
             inp = fm.temp_path(in_ext)
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
             out = fm.temp_path(out_ext)
-            with timer:
-                result = await process_fn(inp, out)
-            out_name = f"{Path(name).stem}_{tool}{out_ext}"
-            doc = FSInputFile(path=str(out), filename=out_name)
-            await bot.send_document(
-                chat_id=cb.message.chat.id,
-                document=doc,
-                caption=f"✅ {tool} done ({timer.elapsed_ms}ms)",
-            )
+            with timer: await process_fn(inp, out)
+            doc = FSInputFile(path=str(out), filename=f"{Path(name).stem}_{tool}{out_ext}")
+            await bot.send_document(chat_id=cb.message.chat.id, document=doc, caption=f"✅ {tool} ({timer.elapsed_ms}ms)")
             await usage.log(uid, ftype, tool, data["file_size"], "success", "", timer.elapsed_ms)
             await cb.message.edit_text(f"✅ {tool} done! ({timer.elapsed_ms}ms)")
     except Exception as e:
-        logger.error(f"Process error ({tool}): {e}", exc_info=True)
+        logger.error(f"Error ({tool}): {e}", exc_info=True)
         await usage.log(uid, ftype, tool, data.get("file_size", 0), "failure", str(e)[:200])
         await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
-        if out:
-            fm.cleanup(out)
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
         _pending.pop(uid, None)
 
 
@@ -420,159 +497,159 @@ async def _do_compress(cb, bot, config, fm, usage, img_svc, level):
     if not data:
         await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("⏳ Compressing...")
+    await cb.answer("⏳")
     await cb.message.edit_text(f"⏳ Compressing ({level})...")
-    inp = None
-    out = None
+    inp = out = None
     try:
         async with _semaphore:
             timer = Timer()
             name = data["file_name"]
-            in_ext = Path(name).suffix if name else ".jpg"
-            inp = fm.temp_path(in_ext)
+            inp = fm.temp_path(Path(name).suffix if name else ".jpg")
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
             out = fm.temp_path(".jpg")
-            with timer:
-                _, orig, new, saved = await img_svc.compress(inp, out, level)
-            out_name = f"{Path(name).stem}_compressed.jpg"
-            doc = FSInputFile(path=str(out), filename=out_name)
-            await bot.send_document(
-                chat_id=cb.message.chat.id,
-                document=doc,
-                caption=(
-                    f"✅ Compressed ({level})\n"
-                    f"📦 {format_size(orig)} → {format_size(new)}\n"
-                    f"💾 Saved: {saved}%\n"
-                    f"⏱ {timer.elapsed_ms}ms"
-                ),
-            )
+            with timer: _, orig, new, saved = await img_svc.compress(inp, out, level)
+            doc = FSInputFile(path=str(out), filename=f"{Path(name).stem}_compressed.jpg")
+            await bot.send_document(chat_id=cb.message.chat.id, document=doc,
+                caption=f"✅ Compressed ({level})\n📦 {format_size(orig)} → {format_size(new)}\n💾 Saved: {saved}%")
             await usage.log(uid, "image", f"compress_{level}", data["file_size"], "success", "", timer.elapsed_ms)
-            await cb.message.edit_text(f"✅ Compressed! Saved {saved}% ({timer.elapsed_ms}ms)")
+            await cb.message.edit_text(f"✅ Compressed! Saved {saved}%")
     except Exception as e:
         logger.error(f"Compress error: {e}", exc_info=True)
         await usage.log(uid, "image", f"compress_{level}", data.get("file_size", 0), "failure", str(e)[:200])
         await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
-        if out:
-            fm.cleanup(out)
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
         _pending.pop(uid, None)
 
 
-async def _do_info(cb, bot, fm, usage, img_svc):
+async def _do_img_info(cb, bot, fm, usage, img_svc):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
         await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("🔍 Analyzing...")
+    await cb.answer("🔍")
     inp = None
     try:
         async with _semaphore:
             name = data["file_name"]
-            in_ext = Path(name).suffix if name else ".jpg"
-            inp = fm.temp_path(in_ext)
+            inp = fm.temp_path(Path(name).suffix if name else ".jpg")
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
             info = await img_svc.get_info(inp)
-
-            gps_warning = "⚠️ YES — GPS location found!" if info["has_gps"] else "✅ No"
-
-            text = (
-                f"📏 Image Info\n"
-                f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📄 Name: {name}\n"
-                f"🖼 Format: {info['format']}\n"
-                f"📐 Size: {info['width']} x {info['height']}\n"
-                f"📊 Megapixels: {info['megapixels']}\n"
-                f"📦 File size: {format_size(info['size_bytes'])}\n"
-                f"🎨 Color mode: {info['mode']}\n"
-                f"📏 DPI: {info['dpi']}\n"
-                f"📷 Camera: {info['camera']}\n"
-                f"🏷 EXIF fields: {info['exif_fields']}\n"
-                f"📍 GPS data: {gps_warning}"
-            )
-
-            await cb.message.edit_text(text)
+            gps = "⚠️ YES!" if info["has_gps"] else "✅ No"
+            await cb.message.edit_text(
+                f"📏 Image Info\n━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📄 {name}\n🖼 {info['format']}\n📐 {info['width']}x{info['height']}\n"
+                f"📊 {info['megapixels']}MP\n📦 {format_size(info['size_bytes'])}\n"
+                f"🎨 {info['mode']}\n📏 DPI: {info['dpi']}\n📷 {info['camera']}\n"
+                f"🏷 EXIF: {info['exif_fields']} fields\n📍 GPS: {gps}")
             await usage.log(uid, "image", "info", data["file_size"], "success")
     except Exception as e:
-        logger.error(f"Info error: {e}", exc_info=True)
         await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
+        if inp: fm.cleanup(inp)
         _pending.pop(uid, None)
 
 
-async def _do_custom_resize_pct(message, bot, config, fm, usage, data, pct):
-    uid = message.from_user.id
+async def _do_pdf_info(cb, bot, fm, usage, pdf_svc):
+    uid = cb.from_user.id
+    data = _pending.get(uid)
+    if not data:
+        await cb.answer("❌ No file pending.", show_alert=True)
+        return
+    await cb.answer("🔍")
     inp = None
-    out = None
     try:
         async with _semaphore:
-            timer = Timer()
-            img_svc = ImageService()
-            name = data["file_name"]
-            in_ext = Path(name).suffix if name else ".jpg"
-            inp = fm.temp_path(in_ext)
+            inp = fm.temp_path(".pdf")
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
-            out = fm.temp_path(in_ext)
-            with timer:
-                await img_svc.resize(inp, out, pct)
-            out_name = f"{Path(name).stem}_resize_{pct}pct{in_ext}"
-            doc = FSInputFile(path=str(out), filename=out_name)
-            await bot.send_document(
-                chat_id=message.chat.id,
-                document=doc,
-                caption=f"✅ Resized to {pct}% ({timer.elapsed_ms}ms)",
-            )
-            await usage.log(uid, "image", f"resize_{pct}", data["file_size"], "success", "", timer.elapsed_ms)
+            info = await pdf_svc.get_info(inp)
+            meta_str = "\n".join([f"  {k}: {v}" for k, v in info.get("metadata", {}).items()]) or "  None"
+            encrypted = "🔒 Yes" if info.get("encrypted") else "🔓 No"
+            await cb.message.edit_text(
+                f"📊 PDF Info\n━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📄 {data['file_name']}\n📦 {format_size(info['size_bytes'])}\n"
+                f"📑 Pages: {info['pages']}\n📐 {info.get('width', 0)}x{info.get('height', 0)} mm\n"
+                f"🔐 Encrypted: {encrypted}\n\n📋 Metadata:\n{meta_str}")
+            await usage.log(uid, "pdf", "info", data["file_size"], "success")
     except Exception as e:
-        logger.error(f"Custom resize error: {e}", exc_info=True)
-        await message.reply(f"❌ Error: {str(e)[:200]}")
+        await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
-        if out:
-            fm.cleanup(out)
+        if inp: fm.cleanup(inp)
         _pending.pop(uid, None)
 
 
-async def _do_custom_resize_exact(message, bot, config, fm, usage, data, width, height):
-    uid = message.from_user.id
-    inp = None
-    out = None
+async def _do_pdf_compress(cb, bot, fm, usage, pdf_svc):
+    uid = cb.from_user.id
+    data = _pending.get(uid)
+    if not data:
+        await cb.answer("❌ No file pending.", show_alert=True)
+        return
+    await cb.answer("⏳")
+    await cb.message.edit_text("⏳ Compressing PDF...")
+    inp = out = None
     try:
         async with _semaphore:
             timer = Timer()
-            img_svc = ImageService()
-            name = data["file_name"]
-            in_ext = Path(name).suffix if name else ".jpg"
-            inp = fm.temp_path(in_ext)
+            inp = fm.temp_path(".pdf")
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
-            out = fm.temp_path(in_ext)
-            with timer:
-                await img_svc.resize_exact(inp, out, width, height)
-            out_name = f"{Path(name).stem}_{width}x{height}{in_ext}"
-            doc = FSInputFile(path=str(out), filename=out_name)
-            await bot.send_document(
-                chat_id=message.chat.id,
-                document=doc,
-                caption=f"✅ Resized to {width}x{height} ({timer.elapsed_ms}ms)",
-            )
-            await usage.log(uid, "image", f"resize_{width}x{height}", data["file_size"], "success", "", timer.elapsed_ms)
+            out = fm.temp_path(".pdf")
+            with timer: _, orig, new, saved = await pdf_svc.compress(inp, out)
+            doc = FSInputFile(path=str(out), filename=f"{Path(data['file_name']).stem}_compressed.pdf")
+            await bot.send_document(chat_id=cb.message.chat.id, document=doc,
+                caption=f"✅ PDF Compressed\n📦 {format_size(orig)} → {format_size(new)}\n💾 Saved: {saved}%")
+            await usage.log(uid, "pdf", "compress", data["file_size"], "success", "", timer.elapsed_ms)
+            await cb.message.edit_text(f"✅ Compressed! Saved {saved}%")
     except Exception as e:
-        logger.error(f"Exact resize error: {e}", exc_info=True)
-        await message.reply(f"❌ Error: {str(e)[:200]}")
+        logger.error(f"PDF compress error: {e}", exc_info=True)
+        await usage.log(uid, "pdf", "compress", data.get("file_size", 0), "failure", str(e)[:200])
+        await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
-        if out:
-            fm.cleanup(out)
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
+        _pending.pop(uid, None)
+
+
+async def _do_pdf_to_images(cb, bot, fm, usage, pdf_svc):
+    uid = cb.from_user.id
+    data = _pending.get(uid)
+    if not data:
+        await cb.answer("❌ No file pending.", show_alert=True)
+        return
+    await cb.answer("⏳")
+    await cb.message.edit_text("⏳ Converting to images...")
+    inp = out_dir = None
+    try:
+        async with _semaphore:
+            timer = Timer()
+            inp = fm.temp_path(".pdf")
+            tg_file = await bot.get_file(data["file_id"])
+            await bot.download_file(tg_file.file_path, destination=str(inp))
+            out_dir = fm.temp_path("_pdfimg")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with timer: paths = await pdf_svc.to_images(inp, out_dir)
+            sent = 0
+            for p in paths[:20]:
+                try:
+                    f = FSInputFile(path=str(p), filename=p.name)
+                    await bot.send_document(chat_id=cb.message.chat.id, document=f)
+                    sent += 1
+                except Exception as e:
+                    logger.warning(f"Send failed: {e}")
+            await cb.message.edit_text(f"✅ {sent} page(s) as images ({timer.elapsed_ms}ms)")
+            await usage.log(uid, "pdf", "to_images", data["file_size"], "success", "", timer.elapsed_ms)
+    except Exception as e:
+        logger.error(f"PDF to images error: {e}", exc_info=True)
+        await usage.log(uid, "pdf", "to_images", data.get("file_size", 0), "failure", str(e)[:200])
+        await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
+    finally:
+        if inp: fm.cleanup(inp)
+        if out_dir: fm.cleanup(out_dir)
         _pending.pop(uid, None)
 
 
@@ -582,132 +659,234 @@ async def _do_text(cb, bot, fm, usage, ftype, tool, extract_fn, in_ext=""):
     if not data:
         await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("⏳ Extracting...")
+    await cb.answer("⏳")
     await cb.message.edit_text("⏳ Extracting text...")
-    inp = None
-    txt_out = None
+    inp = txt_out = None
     try:
         async with _semaphore:
             timer = Timer()
             inp = fm.temp_path(in_ext)
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
-            with timer:
-                text = await extract_fn(inp)
+            with timer: text = await extract_fn(inp)
             if len(text) <= 4000:
-                await bot.send_message(
-                    chat_id=cb.message.chat.id,
-                    text=f"📝 Extracted Text:\n\n{text[:3900]}",
-                )
+                await bot.send_message(chat_id=cb.message.chat.id, text=f"📝 Extracted:\n\n{text[:3900]}")
             else:
                 txt_out = fm.temp_path(".txt")
-                with open(txt_out, "w", encoding="utf-8") as f:
-                    f.write(text)
-                stem = Path(data["file_name"]).stem
-                result = FSInputFile(path=str(txt_out), filename=f"{stem}_text.txt")
-                await bot.send_document(
-                    chat_id=cb.message.chat.id,
-                    document=result,
-                    caption=f"📝 {len(text)} characters extracted",
-                )
+                with open(txt_out, "w", encoding="utf-8") as f: f.write(text)
+                result = FSInputFile(path=str(txt_out), filename=f"{Path(data['file_name']).stem}_text.txt")
+                await bot.send_document(chat_id=cb.message.chat.id, document=result, caption=f"📝 {len(text)} chars")
             await usage.log(uid, ftype, tool, data["file_size"], "success", "", timer.elapsed_ms)
-            await cb.message.edit_text(f"✅ Text extracted ({timer.elapsed_ms}ms)")
+            await cb.message.edit_text(f"✅ Extracted ({timer.elapsed_ms}ms)")
     except Exception as e:
-        logger.error(f"Text extract error: {e}", exc_info=True)
+        logger.error(f"Extract error: {e}", exc_info=True)
         await usage.log(uid, ftype, tool, data.get("file_size", 0), "failure", str(e)[:200])
         await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
-        if txt_out:
-            fm.cleanup(txt_out)
+        if inp: fm.cleanup(inp)
+        if txt_out: fm.cleanup(txt_out)
         _pending.pop(uid, None)
 
 
-async def _do_multi(cb, bot, fm, usage):
+async def _do_multi(cb, bot, fm, usage, pdf_svc):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
         await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("⏳ Extracting images...")
+    await cb.answer("⏳")
     await cb.message.edit_text("⏳ Extracting images...")
-    inp = None
-    out_dir = None
+    inp = out_dir = None
     try:
         async with _semaphore:
             timer = Timer()
-            pdf_svc = PDFService()
             inp = fm.temp_path(".pdf")
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
-            out_dir = fm.temp_path("_images")
+            out_dir = fm.temp_path("_imgs")
             out_dir.mkdir(parents=True, exist_ok=True)
-            with timer:
-                img_paths = await pdf_svc.extract_images(inp, out_dir)
-            if not img_paths:
-                await cb.message.edit_text("ℹ️ No images found in PDF.")
+            with timer: paths = await pdf_svc.extract_images(inp, out_dir)
+            if not paths:
+                await cb.message.edit_text("ℹ️ No images found.")
             else:
                 sent = 0
-                for ip in img_paths[:10]:
+                for p in paths[:10]:
                     try:
-                        f = FSInputFile(path=str(ip), filename=ip.name)
+                        f = FSInputFile(path=str(p), filename=p.name)
                         await bot.send_document(chat_id=cb.message.chat.id, document=f)
                         sent += 1
-                    except Exception as e:
-                        logger.warning(f"Send image failed: {e}")
-                await cb.message.edit_text(f"✅ {sent} image(s) extracted ({timer.elapsed_ms}ms)")
+                    except: pass
+                await cb.message.edit_text(f"✅ {sent} image(s) ({timer.elapsed_ms}ms)")
             await usage.log(uid, "pdf", "extract_images", data["file_size"], "success", "", timer.elapsed_ms)
     except Exception as e:
-        logger.error(f"Image extract error: {e}", exc_info=True)
-        await usage.log(uid, "pdf", "extract_images", data.get("file_size", 0), "failure", str(e)[:200])
+        logger.error(f"Extract error: {e}", exc_info=True)
         await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
-        if out_dir:
-            fm.cleanup(out_dir)
+        if inp: fm.cleanup(inp)
+        if out_dir: fm.cleanup(out_dir)
         _pending.pop(uid, None)
 
 
-async def _do_split(cb, bot, fm, usage):
+async def _do_split(cb, bot, fm, usage, pdf_svc):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
         await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("⏳ Splitting...")
-    await cb.message.edit_text("⏳ Splitting pages...")
-    inp = None
-    out_dir = None
+    await cb.answer("⏳")
+    await cb.message.edit_text("⏳ Splitting...")
+    inp = out_dir = None
     try:
         async with _semaphore:
             timer = Timer()
-            pdf_svc = PDFService()
             inp = fm.temp_path(".pdf")
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
             out_dir = fm.temp_path("_pages")
             out_dir.mkdir(parents=True, exist_ok=True)
-            with timer:
-                pages = await pdf_svc.split_pages(inp, out_dir)
+            with timer: pages = await pdf_svc.split_pages(inp, out_dir)
             sent = 0
-            for pp in pages[:20]:
+            for p in pages[:20]:
                 try:
-                    f = FSInputFile(path=str(pp), filename=pp.name)
+                    f = FSInputFile(path=str(p), filename=p.name)
                     await bot.send_document(chat_id=cb.message.chat.id, document=f)
                     sent += 1
-                except Exception as e:
-                    logger.warning(f"Send page failed: {e}")
-            await cb.message.edit_text(f"✅ Split into {sent} page(s) ({timer.elapsed_ms}ms)")
-            await usage.log(uid, "pdf", "split_pages", data["file_size"], "success", "", timer.elapsed_ms)
+                except: pass
+            await cb.message.edit_text(f"✅ {sent} pages ({timer.elapsed_ms}ms)")
+            await usage.log(uid, "pdf", "split", data["file_size"], "success", "", timer.elapsed_ms)
     except Exception as e:
         logger.error(f"Split error: {e}", exc_info=True)
-        await usage.log(uid, "pdf", "split_pages", data.get("file_size", 0), "failure", str(e)[:200])
         await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
-        if inp:
-            fm.cleanup(inp)
-        if out_dir:
-            fm.cleanup(out_dir)
+        if inp: fm.cleanup(inp)
+        if out_dir: fm.cleanup(out_dir)
+        _pending.pop(uid, None)
+
+
+async def _do_protect(message, bot, fm, usage, data, password):
+    uid = message.from_user.id
+    inp = out = None
+    try:
+        async with _semaphore:
+            timer = Timer()
+            pdf_svc = PDFService()
+            inp = fm.temp_path(".pdf")
+            tg_file = await bot.get_file(data["file_id"])
+            await bot.download_file(tg_file.file_path, destination=str(inp))
+            out = fm.temp_path(".pdf")
+            with timer: await pdf_svc.protect(inp, out, password)
+            doc = FSInputFile(path=str(out), filename=f"{Path(data['file_name']).stem}_protected.pdf")
+            await bot.send_document(chat_id=message.chat.id, document=doc,
+                caption=f"🔒 Password protected ({timer.elapsed_ms}ms)\n⚠️ Remember your password!")
+            await usage.log(uid, "pdf", "protect", data["file_size"], "success", "", timer.elapsed_ms)
+    except Exception as e:
+        logger.error(f"Protect error: {e}", exc_info=True)
+        await message.reply(f"❌ Error: {str(e)[:200]}")
+    finally:
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
+        _pending.pop(uid, None)
+
+
+async def _do_unlock(message, bot, fm, usage, data, password):
+    uid = message.from_user.id
+    inp = out = None
+    try:
+        async with _semaphore:
+            timer = Timer()
+            pdf_svc = PDFService()
+            inp = fm.temp_path(".pdf")
+            tg_file = await bot.get_file(data["file_id"])
+            await bot.download_file(tg_file.file_path, destination=str(inp))
+            out = fm.temp_path(".pdf")
+            with timer: result, success = await pdf_svc.remove_password(inp, out, password)
+            if success:
+                doc = FSInputFile(path=str(out), filename=f"{Path(data['file_name']).stem}_unlocked.pdf")
+                await bot.send_document(chat_id=message.chat.id, document=doc,
+                    caption=f"🔓 Password removed ({timer.elapsed_ms}ms)")
+                await usage.log(uid, "pdf", "unlock", data["file_size"], "success", "", timer.elapsed_ms)
+            else:
+                await message.reply("❌ Wrong password. Try again.")
+                await usage.log(uid, "pdf", "unlock", data["file_size"], "failure", "wrong password")
+    except Exception as e:
+        logger.error(f"Unlock error: {e}", exc_info=True)
+        await message.reply(f"❌ Error: {str(e)[:200]}")
+    finally:
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
+        _pending.pop(uid, None)
+
+
+async def _do_extract_pages(message, bot, fm, usage, data, start, end):
+    uid = message.from_user.id
+    inp = out = None
+    try:
+        async with _semaphore:
+            timer = Timer()
+            pdf_svc = PDFService()
+            inp = fm.temp_path(".pdf")
+            tg_file = await bot.get_file(data["file_id"])
+            await bot.download_file(tg_file.file_path, destination=str(inp))
+            out = fm.temp_path(".pdf")
+            with timer: _, s, e = await pdf_svc.extract_page_range(inp, out, start, end)
+            doc = FSInputFile(path=str(out), filename=f"{Path(data['file_name']).stem}_p{s}-{e}.pdf")
+            await bot.send_document(chat_id=message.chat.id, document=doc,
+                caption=f"✅ Pages {s}-{e} extracted ({timer.elapsed_ms}ms)")
+            await usage.log(uid, "pdf", f"pages_{s}-{e}", data["file_size"], "success", "", timer.elapsed_ms)
+    except Exception as e:
+        logger.error(f"Extract pages error: {e}", exc_info=True)
+        await message.reply(f"❌ Error: {str(e)[:200]}")
+    finally:
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
+        _pending.pop(uid, None)
+
+
+async def _do_resize_pct(message, bot, config, fm, usage, data, pct):
+    uid = message.from_user.id
+    inp = out = None
+    try:
+        async with _semaphore:
+            timer = Timer()
+            img_svc = ImageService()
+            name = data["file_name"]
+            in_ext = Path(name).suffix if name else ".jpg"
+            inp = fm.temp_path(in_ext)
+            tg_file = await bot.get_file(data["file_id"])
+            await bot.download_file(tg_file.file_path, destination=str(inp))
+            out = fm.temp_path(in_ext)
+            with timer: await img_svc.resize(inp, out, pct)
+            doc = FSInputFile(path=str(out), filename=f"{Path(name).stem}_{pct}pct{in_ext}")
+            await bot.send_document(chat_id=message.chat.id, document=doc, caption=f"✅ Resized to {pct}% ({timer.elapsed_ms}ms)")
+            await usage.log(uid, "image", f"resize_{pct}", data["file_size"], "success", "", timer.elapsed_ms)
+    except Exception as e:
+        await message.reply(f"❌ Error: {str(e)[:200]}")
+    finally:
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
+        _pending.pop(uid, None)
+
+
+async def _do_resize_exact(message, bot, config, fm, usage, data, w, h):
+    uid = message.from_user.id
+    inp = out = None
+    try:
+        async with _semaphore:
+            timer = Timer()
+            img_svc = ImageService()
+            name = data["file_name"]
+            in_ext = Path(name).suffix if name else ".jpg"
+            inp = fm.temp_path(in_ext)
+            tg_file = await bot.get_file(data["file_id"])
+            await bot.download_file(tg_file.file_path, destination=str(inp))
+            out = fm.temp_path(in_ext)
+            with timer: await img_svc.resize_exact(inp, out, w, h)
+            doc = FSInputFile(path=str(out), filename=f"{Path(name).stem}_{w}x{h}{in_ext}")
+            await bot.send_document(chat_id=message.chat.id, document=doc, caption=f"✅ Resized to {w}x{h} ({timer.elapsed_ms}ms)")
+            await usage.log(uid, "image", f"resize_{w}x{h}", data["file_size"], "success", "", timer.elapsed_ms)
+    except Exception as e:
+        await message.reply(f"❌ Error: {str(e)[:200]}")
+    finally:
+        if inp: fm.cleanup(inp)
+        if out: fm.cleanup(out)
         _pending.pop(uid, None)
