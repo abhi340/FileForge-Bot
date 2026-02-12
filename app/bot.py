@@ -36,7 +36,7 @@ async def setup_bot(config):
         is_admin = message.from_user.id == config.admin_id
         badge = " (Admin)" if is_admin else ""
         await message.reply(
-            f"Welcome to File Utility Bot!{badge}\n\n"
+            f"Welcome to File Forge Bot!{badge}\n\n"
             f"Send me a file and choose what to do.\n\n"
             f"Supported:\n"
             f"Images - metadata, resize, convert\n"
