@@ -95,4 +95,8 @@ echo "Commands:"
 echo "  sudo systemctl daemon-reload"
 echo "  sudo systemctl enable filebot"
 echo "  sudo systemctl start filebot"
+
 echo "  sudo journalctl -u filebot -f"
+
+
+
