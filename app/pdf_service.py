@@ -1,7 +1,3 @@
-"""
-PDF processing — metadata removal, text extraction, image extraction, split.
-"""
-
 from pathlib import Path
 from typing import List
 
@@ -15,7 +11,7 @@ from app.config import logger
 class PDFService:
 
     @staticmethod
-    async def remove_metadata(input_path: Path, output_path: Path) -> Path:
+    async def remove_metadata(input_path, output_path):
         with pikepdf.open(input_path) as pdf:
             with pdf.open_metadata() as meta:
                 for key in list(meta.keys()):
@@ -23,11 +19,11 @@ class PDFService:
             if "/Info" in pdf.trailer:
                 del pdf.trailer["/Info"]
             pdf.save(output_path)
-        logger.info(f"PDF metadata removed: {output_path.name}")
+        logger.info(f"PDF metadata removed")
         return output_path
 
     @staticmethod
-    async def extract_text(input_path: Path) -> str:
+    async def extract_text(input_path):
         parts = []
         with pdfplumber.open(input_path) as pdf:
             for i, page in enumerate(pdf.pages):
@@ -41,7 +37,7 @@ class PDFService:
         return result
 
     @staticmethod
-    async def extract_images(input_path: Path, output_dir: Path) -> List[Path]:
+    async def extract_images(input_path, output_dir):
         output_dir.mkdir(parents=True, exist_ok=True)
         paths = []
         doc = fitz.open(str(input_path))
@@ -64,7 +60,7 @@ class PDFService:
         return paths
 
     @staticmethod
-    async def split_pages(input_path: Path, output_dir: Path) -> List[Path]:
+    async def split_pages(input_path, output_dir):
         output_dir.mkdir(parents=True, exist_ok=True)
         paths = []
         with pikepdf.open(input_path) as pdf:
