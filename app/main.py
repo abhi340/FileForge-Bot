@@ -27,6 +27,16 @@ async def main():
     config = load_config()
     bot, dp, db, fm = await setup_bot(config)
 
+    # Auto-delete webhook on startup
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook deleted successfully")
+    except Exception as e:
+        logger.warning(f"Delete webhook failed: {e}")
+
+    # Small delay to let old instance die
+    await asyncio.sleep(3)
+
     try:
         await health_server(config.port)
     except Exception as e:
