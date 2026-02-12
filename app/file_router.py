@@ -26,33 +26,33 @@ _semaphore = asyncio.Semaphore(2)
 def _keyboard(category):
     buttons = {
         "image": [
-            [InlineKeyboardButton(text="Remove Metadata", callback_data="img_meta")],
-            [InlineKeyboardButton(text="Resize 50%", callback_data="img_r50")],
-            [InlineKeyboardButton(text="Resize 25%", callback_data="img_r25")],
+            [InlineKeyboardButton(text="🧹 Remove Metadata", callback_data="img_meta")],
+            [InlineKeyboardButton(text="📐 Resize 50%", callback_data="img_r50")],
+            [InlineKeyboardButton(text="📐 Resize 25%", callback_data="img_r25")],
             [
-                InlineKeyboardButton(text="PNG", callback_data="img_png"),
-                InlineKeyboardButton(text="JPG", callback_data="img_jpg"),
-                InlineKeyboardButton(text="WEBP", callback_data="img_webp"),
+                InlineKeyboardButton(text="→ PNG", callback_data="img_png"),
+                InlineKeyboardButton(text="→ JPG", callback_data="img_jpg"),
+                InlineKeyboardButton(text="→ WEBP", callback_data="img_webp"),
             ],
-            [InlineKeyboardButton(text="Cancel", callback_data="cancel")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel")],
         ],
         "pdf": [
-            [InlineKeyboardButton(text="Remove Metadata", callback_data="pdf_meta")],
-            [InlineKeyboardButton(text="Extract Text", callback_data="pdf_text")],
-            [InlineKeyboardButton(text="Extract Images", callback_data="pdf_imgs")],
-            [InlineKeyboardButton(text="Split Pages", callback_data="pdf_split")],
-            [InlineKeyboardButton(text="Cancel", callback_data="cancel")],
+            [InlineKeyboardButton(text="🧹 Remove Metadata", callback_data="pdf_meta")],
+            [InlineKeyboardButton(text="📝 Extract Text", callback_data="pdf_text")],
+            [InlineKeyboardButton(text="🖼 Extract Images", callback_data="pdf_imgs")],
+            [InlineKeyboardButton(text="✂️ Split Pages", callback_data="pdf_split")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel")],
         ],
         "docx": [
-            [InlineKeyboardButton(text="Remove Metadata", callback_data="docx_meta")],
-            [InlineKeyboardButton(text="Remove Comments", callback_data="docx_comments")],
-            [InlineKeyboardButton(text="Extract Text", callback_data="docx_text")],
-            [InlineKeyboardButton(text="Cancel", callback_data="cancel")],
+            [InlineKeyboardButton(text="🧹 Remove Metadata", callback_data="docx_meta")],
+            [InlineKeyboardButton(text="💬 Remove Comments", callback_data="docx_comments")],
+            [InlineKeyboardButton(text="📝 Extract Text", callback_data="docx_text")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel")],
         ],
     }
     return InlineKeyboardMarkup(
         inline_keyboard=buttons.get(category, [
-            [InlineKeyboardButton(text="Unsupported", callback_data="cancel")]
+            [InlineKeyboardButton(text="❌ Unsupported", callback_data="cancel")]
         ])
     )
 
@@ -62,6 +62,42 @@ def register_file_handlers(rt, config, fm, usage, bot):
     pdf = PDFService()
     docx = DOCXService()
 
+    # Handle photos sent directly (compressed)
+    @rt.message(F.photo)
+    async def on_photo(message: Message):
+        user_id = message.from_user.id
+
+        # Get largest photo size
+        photo = message.photo[-1]
+
+        # Check size
+        if photo.file_size and photo.file_size > config.max_file_size_bytes:
+            max_mb = config.max_file_size_mb
+            actual = round(photo.file_size / (1024 * 1024), 2)
+            await message.reply(f"❌ Photo too large: {actual}MB (max {max_mb}MB)")
+            return
+
+        _pending[user_id] = {
+            "file_id": photo.file_id,
+            "file_name": "photo.jpg",
+            "file_size": photo.file_size or 0,
+            "mime_type": "image/jpeg",
+            "category": "image",
+            "is_photo": True,
+        }
+
+        size_str = format_size(photo.file_size or 0)
+        await message.reply(
+            f"🖼 Photo received!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 Size: {size_str}\n"
+            f"🏷 Type: IMAGE\n\n"
+            f"⚠️ Tip: Send as File for better quality\n\n"
+            f"Choose operation:",
+            reply_markup=_keyboard("image"),
+        )
+
+    # Handle documents (files)
     @rt.message(F.document)
     async def on_file(message: Message):
         doc = message.document
@@ -70,12 +106,12 @@ def register_file_handlers(rt, config, fm, usage, bot):
         if doc.file_size and doc.file_size > config.max_file_size_bytes:
             max_mb = config.max_file_size_mb
             actual = round(doc.file_size / (1024 * 1024), 2)
-            await message.reply(f"File too large: {actual}MB (max {max_mb}MB)")
+            await message.reply(f"❌ File too large: {actual}MB (max {max_mb}MB)")
             return
 
         category = detect_category(doc.mime_type)
         if not category:
-            await message.reply(f"Unsupported type: {doc.mime_type}\nSupported: image, pdf, docx")
+            await message.reply(f"❌ Unsupported type: {doc.mime_type}\nSupported: image, pdf, docx")
             return
 
         _pending[user_id] = {
@@ -84,14 +120,16 @@ def register_file_handlers(rt, config, fm, usage, bot):
             "file_size": doc.file_size or 0,
             "mime_type": doc.mime_type,
             "category": category,
+            "is_photo": False,
         }
 
         size_str = format_size(doc.file_size or 0)
         await message.reply(
-            f"File received!\n"
-            f"Name: {doc.file_name}\n"
-            f"Size: {size_str}\n"
-            f"Type: {category.upper()}\n\n"
+            f"📁 File received!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 {doc.file_name}\n"
+            f"📦 {size_str}\n"
+            f"🏷 {category.upper()}\n\n"
             f"Choose operation:",
             reply_markup=_keyboard(category),
         )
@@ -99,7 +137,7 @@ def register_file_handlers(rt, config, fm, usage, bot):
     @rt.callback_query(F.data == "cancel")
     async def on_cancel(cb: CallbackQuery):
         _pending.pop(cb.from_user.id, None)
-        await cb.message.edit_text("Cancelled.")
+        await cb.message.edit_text("❌ Cancelled.")
         await cb.answer()
 
     @rt.callback_query(F.data == "img_meta")
@@ -170,38 +208,41 @@ async def _do(cb, bot, config, fm, usage, ftype, tool, process_fn, out_ext=""):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
-        await cb.answer("No file pending. Upload again.", show_alert=True)
+        await cb.answer("❌ No file pending. Upload again.", show_alert=True)
         return
-    await cb.answer("Processing...")
-    await cb.message.edit_text(f"Processing {tool}...")
+    await cb.answer("⏳ Processing...")
+    await cb.message.edit_text(f"⏳ Processing {tool}...")
     inp = None
     out = None
     try:
         async with _semaphore:
             timer = Timer()
             name = data["file_name"]
-            in_ext = Path(name).suffix if name else ""
+            in_ext = Path(name).suffix if name else ".jpg"
             if not out_ext:
                 out_ext = in_ext
+
             inp = fm.temp_path(in_ext)
             tg_file = await bot.get_file(data["file_id"])
             await bot.download_file(tg_file.file_path, destination=str(inp))
+
             out = fm.temp_path(out_ext)
             with timer:
                 await process_fn(inp, out)
+
             out_name = f"{Path(name).stem}_{tool}{out_ext}"
             result = FSInputFile(path=str(out), filename=out_name)
             await bot.send_document(
                 chat_id=cb.message.chat.id,
                 document=result,
-                caption=f"{tool} done ({timer.elapsed_ms}ms)",
+                caption=f"✅ {tool} done ({timer.elapsed_ms}ms)",
             )
             await usage.log(uid, ftype, tool, data["file_size"], "success", "", timer.elapsed_ms)
-            await cb.message.edit_text(f"{tool} done! ({timer.elapsed_ms}ms)")
+            await cb.message.edit_text(f"✅ {tool} done! ({timer.elapsed_ms}ms)")
     except Exception as e:
         logger.error(f"Process error ({tool}): {e}", exc_info=True)
         await usage.log(uid, ftype, tool, data.get("file_size", 0), "failure", str(e)[:200])
-        await cb.message.edit_text(f"Error: {str(e)[:200]}")
+        await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
         if inp:
             fm.cleanup(inp)
@@ -214,10 +255,10 @@ async def _do_text(cb, bot, fm, usage, ftype, tool, extract_fn, in_ext=""):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
-        await cb.answer("No file pending.", show_alert=True)
+        await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("Extracting...")
-    await cb.message.edit_text("Extracting text...")
+    await cb.answer("⏳ Extracting...")
+    await cb.message.edit_text("⏳ Extracting text...")
     inp = None
     txt_out = None
     try:
@@ -231,7 +272,7 @@ async def _do_text(cb, bot, fm, usage, ftype, tool, extract_fn, in_ext=""):
             if len(text) <= 4000:
                 await bot.send_message(
                     chat_id=cb.message.chat.id,
-                    text=f"Extracted Text:\n\n{text[:3900]}",
+                    text=f"📝 Extracted Text:\n\n{text[:3900]}",
                 )
             else:
                 txt_out = fm.temp_path(".txt")
@@ -242,14 +283,14 @@ async def _do_text(cb, bot, fm, usage, ftype, tool, extract_fn, in_ext=""):
                 await bot.send_document(
                     chat_id=cb.message.chat.id,
                     document=result,
-                    caption=f"{len(text)} characters extracted",
+                    caption=f"📝 {len(text)} characters extracted",
                 )
             await usage.log(uid, ftype, tool, data["file_size"], "success", "", timer.elapsed_ms)
-            await cb.message.edit_text(f"Text extracted ({timer.elapsed_ms}ms)")
+            await cb.message.edit_text(f"✅ Text extracted ({timer.elapsed_ms}ms)")
     except Exception as e:
         logger.error(f"Text extract error: {e}", exc_info=True)
         await usage.log(uid, ftype, tool, data.get("file_size", 0), "failure", str(e)[:200])
-        await cb.message.edit_text(f"Error: {str(e)[:200]}")
+        await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
         if inp:
             fm.cleanup(inp)
@@ -262,10 +303,10 @@ async def _do_multi(cb, bot, fm, usage):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
-        await cb.answer("No file pending.", show_alert=True)
+        await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("Extracting images...")
-    await cb.message.edit_text("Extracting images...")
+    await cb.answer("⏳ Extracting images...")
+    await cb.message.edit_text("⏳ Extracting images...")
     inp = None
     out_dir = None
     try:
@@ -280,7 +321,7 @@ async def _do_multi(cb, bot, fm, usage):
             with timer:
                 img_paths = await pdf_svc.extract_images(inp, out_dir)
             if not img_paths:
-                await cb.message.edit_text("No images found in PDF.")
+                await cb.message.edit_text("ℹ️ No images found in PDF.")
             else:
                 sent = 0
                 for ip in img_paths[:10]:
@@ -290,13 +331,13 @@ async def _do_multi(cb, bot, fm, usage):
                         sent += 1
                     except Exception as e:
                         logger.warning(f"Send image failed: {e}")
-                msg = f"{sent} image(s) extracted ({timer.elapsed_ms}ms)"
+                msg = f"✅ {sent} image(s) extracted ({timer.elapsed_ms}ms)"
                 await cb.message.edit_text(msg)
             await usage.log(uid, "pdf", "extract_images", data["file_size"], "success", "", timer.elapsed_ms)
     except Exception as e:
         logger.error(f"Image extract error: {e}", exc_info=True)
         await usage.log(uid, "pdf", "extract_images", data.get("file_size", 0), "failure", str(e)[:200])
-        await cb.message.edit_text(f"Error: {str(e)[:200]}")
+        await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
         if inp:
             fm.cleanup(inp)
@@ -309,10 +350,10 @@ async def _do_split(cb, bot, fm, usage):
     uid = cb.from_user.id
     data = _pending.get(uid)
     if not data:
-        await cb.answer("No file pending.", show_alert=True)
+        await cb.answer("❌ No file pending.", show_alert=True)
         return
-    await cb.answer("Splitting...")
-    await cb.message.edit_text("Splitting pages...")
+    await cb.answer("⏳ Splitting...")
+    await cb.message.edit_text("⏳ Splitting pages...")
     inp = None
     out_dir = None
     try:
@@ -334,12 +375,12 @@ async def _do_split(cb, bot, fm, usage):
                     sent += 1
                 except Exception as e:
                     logger.warning(f"Send page failed: {e}")
-            await cb.message.edit_text(f"Split into {sent} page(s) ({timer.elapsed_ms}ms)")
+            await cb.message.edit_text(f"✅ Split into {sent} page(s) ({timer.elapsed_ms}ms)")
             await usage.log(uid, "pdf", "split_pages", data["file_size"], "success", "", timer.elapsed_ms)
     except Exception as e:
         logger.error(f"Split error: {e}", exc_info=True)
         await usage.log(uid, "pdf", "split_pages", data.get("file_size", 0), "failure", str(e)[:200])
-        await cb.message.edit_text(f"Error: {str(e)[:200]}")
+        await cb.message.edit_text(f"❌ Error: {str(e)[:200]}")
     finally:
         if inp:
             fm.cleanup(inp)
