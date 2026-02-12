@@ -1,0 +1,9 @@
+aiogram==3.13.1
+aiosqlite==0.20.0
+Pillow==10.4.0
+pikepdf==9.2.1
+pdfplumber==0.11.4
+python-docx==1.1.2
+PyMuPDF==1.24.11
+python-dotenv==1.0.1
+aiohttp==3.10.5
