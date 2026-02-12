@@ -14,7 +14,7 @@ class ImageService:
             if fmt.upper() == "JPEG":
                 clean.save(output_path, format=fmt, quality=95)
             else:
-                clean.save(output_path, format=fmt)
+                clean.save(output_path, format=fmt, optimize=True)
         logger.info(f"Image metadata removed")
         return output_path
 
@@ -25,9 +25,12 @@ class ImageService:
             new_h = max(1, int(img.height * percentage / 100))
             resized = img.resize((new_w, new_h), Image.LANCZOS)
             fmt = img.format or "PNG"
-            if fmt.upper() == "JPEG" and resized.mode in ("RGBA", "LA", "P"):
-                resized = resized.convert("RGB")
-            resized.save(output_path, format=fmt)
+            if fmt.upper() == "JPEG":
+                if resized.mode in ("RGBA", "LA", "P"):
+                    resized = resized.convert("RGB")
+                resized.save(output_path, format=fmt, quality=85)
+            else:
+                resized.save(output_path, format=fmt, optimize=True)
         logger.info(f"Image resized to {percentage}%")
         return output_path
 
@@ -36,8 +39,15 @@ class ImageService:
         fmt_map = {"JPG": "JPEG", "JPEG": "JPEG", "PNG": "PNG", "WEBP": "WEBP", "BMP": "BMP"}
         pil_fmt = fmt_map.get(target.upper(), "PNG")
         with Image.open(input_path) as img:
-            if pil_fmt == "JPEG" and img.mode in ("RGBA", "LA", "P"):
-                img = img.convert("RGB")
-            img.save(output_path, format=pil_fmt)
+            if pil_fmt == "JPEG":
+                if img.mode in ("RGBA", "LA", "P"):
+                    img = img.convert("RGB")
+                img.save(output_path, format=pil_fmt, quality=85, optimize=True)
+            elif pil_fmt == "PNG":
+                img.save(output_path, format=pil_fmt, optimize=True, compress_level=9)
+            elif pil_fmt == "WEBP":
+                img.save(output_path, format=pil_fmt, quality=85, method=6)
+            else:
+                img.save(output_path, format=pil_fmt)
         logger.info(f"Image converted to {target}")
         return output_path
