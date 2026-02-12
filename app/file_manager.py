@@ -1,75 +1,98 @@
-"""
-Access control middleware.
-Enforces whitelist, suspension, maintenance, rate limits.
-"""
+import uuid
+import time
+import shutil
+from pathlib import Path
+from typing import Optional
 
-from typing import Callable, Dict, Any, Awaitable
+from aiogram import Bot
+from aiogram.types import Document, FSInputFile
 
-from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery, TelegramObject
-
-from app.config import BotConfig, logger
-from app.database import WhitelistRepo, SystemRepo
+from app.config import logger
 
 
-class AccessMiddleware(BaseMiddleware):
-    def __init__(self, config: BotConfig, whitelist: WhitelistRepo, system: SystemRepo):
-        self.config = config
-        self.whitelist = whitelist
-        self.system = system
-        super().__init__()
+class FileManager:
+    def __init__(self, temp_dir="tmp"):
+        self.temp_dir = Path(temp_dir)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: Dict[str, Any],
-    ) -> Any:
-        user_id = self._get_user_id(event)
-        if user_id is None:
-            return
+    def temp_path(self, extension=""):
+        return self.temp_dir / f"{uuid.uuid4().hex}{extension}"
 
-        if user_id == self.config.admin_id:
-            return await handler(event, data)
+    async def download(self, bot, document):
+        ext = ""
+        if document.file_name:
+            ext = Path(document.file_name).suffix
+        path = self.temp_path(ext)
+        tg_file = await bot.get_file(document.file_id)
+        await bot.download_file(tg_file.file_path, destination=str(path))
+        logger.info(f"Downloaded: {path.name}")
+        return path
 
-        maintenance = await self.system.get_stat("maintenance_mode", "0")
-        if maintenance == "1":
-            await self._reply(event, "🔧 Bot is under maintenance. Try again later.")
-            return
+    def cleanup(self, *paths):
+        for p in paths:
+            try:
+                if p and Path(p).exists():
+                    if Path(p).is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        Path(p).unlink()
+            except Exception as e:
+                logger.warning(f"Cleanup failed {p}: {e}")
 
-        if not await self.whitelist.is_whitelisted(user_id):
-            if isinstance(event, Message) and event.text and event.text.startswith("/start"):
-                await self._reply(
-                    event,
-                    f"👋 You're not authorized yet.\nContact admin.\n\nYour ID: `{user_id}`",
-                )
-            return
-
-        if await self.whitelist.is_suspended(user_id):
-            await self._reply(event, "🔴 Your account is suspended. Contact admin.")
-            return
-
-        if isinstance(event, CallbackQuery) and event.data and event.data != "cancel":
-            if not await self.whitelist.check_daily_limit(user_id):
-                await self._reply(event, "⚠️ Daily limit reached. Try tomorrow.")
-                return
-
-        return await handler(event, data)
+    def cleanup_all(self):
+        if not self.temp_dir.exists():
+            return 0
+        count = 0
+        for item in self.temp_dir.iterdir():
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink()
+                count += 1
+            except Exception as e:
+                logger.warning(f"Cleanup failed {item}: {e}")
+        return count
 
     @staticmethod
-    def _get_user_id(event: TelegramObject) -> int | None:
-        if isinstance(event, Message) and event.from_user:
-            return event.from_user.id
-        if isinstance(event, CallbackQuery) and event.from_user:
-            return event.from_user.id
+    def input_file(path, filename=None):
+        return FSInputFile(path=str(path), filename=filename)
+
+
+class Timer:
+    def __init__(self):
+        self.start_time = 0
+        self.elapsed_ms = 0
+
+    def __enter__(self):
+        self.start_time = time.perf_counter()
+        return self
+
+    def __exit__(self, *args):
+        self.elapsed_ms = int((time.perf_counter() - self.start_time) * 1000)
+
+
+def format_size(size_bytes):
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+SUPPORTED_TYPES = {
+    "image/jpeg": "image",
+    "image/png": "image",
+    "image/webp": "image",
+    "image/bmp": "image",
+    "image/tiff": "image",
+    "image/gif": "image",
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+}
+
+
+def detect_category(mime_type):
+    if not mime_type:
         return None
-
-    @staticmethod
-    async def _reply(event: TelegramObject, text: str) -> None:
-        try:
-            if isinstance(event, Message):
-                await event.reply(text, parse_mode="Markdown")
-            elif isinstance(event, CallbackQuery):
-                await event.answer(text[:200], show_alert=True)
-        except Exception as e:
-            logger.warning(f"Middleware reply failed: {e}")
+    return SUPPORTED_TYPES.get(mime_type)
