@@ -1,7 +1,3 @@
-"""
-Entry point — startup, polling, shutdown.
-"""
-
 import asyncio
 import sys
 
@@ -11,8 +7,7 @@ from app.config import load_config, logger
 from app.bot import setup_bot
 
 
-async def health_server(port: int) -> None:
-    """Minimal HTTP server for health checks."""
+async def health_server(port):
     async def handle(request):
         return web.Response(text="OK")
 
@@ -26,19 +21,16 @@ async def health_server(port: int) -> None:
     logger.info(f"Health server on port {port}")
 
 
-async def main() -> None:
-    logger.info("=" * 40)
+async def main():
     logger.info("Starting File Utility Bot...")
-    logger.info("=" * 40)
 
     config = load_config()
     bot, dp, db, fm = await setup_bot(config)
 
-    # Health check server (optional, for monitoring)
     try:
         await health_server(config.port)
     except Exception as e:
-        logger.warning(f"Health server failed (non-critical): {e}")
+        logger.warning(f"Health server failed: {e}")
 
     try:
         logger.info("Polling started...")
@@ -48,9 +40,8 @@ async def main() -> None:
             drop_pending_updates=True,
         )
     except Exception as e:
-        logger.critical(f"Polling error: {e}", exc_info=True)
+        logger.critical(f"Polling error: {e}")
     finally:
-        logger.info("Shutting down...")
         fm.cleanup_all()
         await db.disconnect()
         await bot.session.close()
@@ -61,7 +52,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Interrupted. Exiting.")
+        logger.info("Interrupted.")
     except Exception as e:
-        logger.critical(f"Fatal: {e}", exc_info=True)
+        logger.critical(f"Fatal: {e}")
         sys.exit(1)
