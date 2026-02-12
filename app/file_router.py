@@ -710,7 +710,7 @@ async def _do_multi(cb, bot, fm, usage, pdf_svc):
         return
     await cb.answer("⏳")
     await cb.message.edit_text("⏳ Extracting images...")
-    inp = out_dir = None
+    inp = out_dir = zip_path = None
     try:
         async with _semaphore:
             timer = Timer()
@@ -722,15 +722,25 @@ async def _do_multi(cb, bot, fm, usage, pdf_svc):
             with timer: paths = await pdf_svc.extract_images(inp, out_dir)
             if not paths:
                 await cb.message.edit_text("ℹ️ No images found.")
-            else:
+            elif len(paths) <= 10:
                 sent = 0
-                for p in paths[:10]:
+                for p in paths:
                     try:
                         f = FSInputFile(path=str(p), filename=p.name)
                         await bot.send_document(chat_id=cb.message.chat.id, document=f)
                         sent += 1
                     except: pass
                 await cb.message.edit_text(f"✅ {sent} image(s) ({timer.elapsed_ms}ms)")
+            else:
+                import zipfile
+                zip_path = fm.temp_path(".zip")
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for p in paths:
+                        zf.write(p, p.name)
+                f = FSInputFile(path=str(zip_path), filename=f"{Path(data['file_name']).stem}_images.zip")
+                await bot.send_document(chat_id=cb.message.chat.id, document=f,
+                    caption=f"✅ {len(paths)} images extracted (zipped)\n⏱ {timer.elapsed_ms}ms")
+                await cb.message.edit_text(f"✅ {len(paths)} images → ZIP ({timer.elapsed_ms}ms)")
             await usage.log(uid, "pdf", "extract_images", data["file_size"], "success", "", timer.elapsed_ms)
     except Exception as e:
         logger.error(f"Extract error: {e}", exc_info=True)
@@ -738,6 +748,7 @@ async def _do_multi(cb, bot, fm, usage, pdf_svc):
     finally:
         if inp: fm.cleanup(inp)
         if out_dir: fm.cleanup(out_dir)
+        if zip_path: fm.cleanup(zip_path)
         _pending.pop(uid, None)
 
 
@@ -749,7 +760,7 @@ async def _do_split(cb, bot, fm, usage, pdf_svc):
         return
     await cb.answer("⏳")
     await cb.message.edit_text("⏳ Splitting...")
-    inp = out_dir = None
+    inp = out_dir = zip_path = None
     try:
         async with _semaphore:
             timer = Timer()
@@ -759,14 +770,25 @@ async def _do_split(cb, bot, fm, usage, pdf_svc):
             out_dir = fm.temp_path("_pages")
             out_dir.mkdir(parents=True, exist_ok=True)
             with timer: pages = await pdf_svc.split_pages(inp, out_dir)
-            sent = 0
-            for p in pages[:20]:
-                try:
-                    f = FSInputFile(path=str(p), filename=p.name)
-                    await bot.send_document(chat_id=cb.message.chat.id, document=f)
-                    sent += 1
-                except: pass
-            await cb.message.edit_text(f"✅ {sent} pages ({timer.elapsed_ms}ms)")
+            if len(pages) <= 10:
+                sent = 0
+                for p in pages:
+                    try:
+                        f = FSInputFile(path=str(p), filename=p.name)
+                        await bot.send_document(chat_id=cb.message.chat.id, document=f)
+                        sent += 1
+                    except: pass
+                await cb.message.edit_text(f"✅ {sent} pages ({timer.elapsed_ms}ms)")
+            else:
+                import zipfile
+                zip_path = fm.temp_path(".zip")
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for p in pages:
+                        zf.write(p, p.name)
+                f = FSInputFile(path=str(zip_path), filename=f"{Path(data['file_name']).stem}_split.zip")
+                await bot.send_document(chat_id=cb.message.chat.id, document=f,
+                    caption=f"✅ Split into {len(pages)} pages (zipped)\n⏱ {timer.elapsed_ms}ms")
+                await cb.message.edit_text(f"✅ {len(pages)} pages → ZIP ({timer.elapsed_ms}ms)")
             await usage.log(uid, "pdf", "split", data["file_size"], "success", "", timer.elapsed_ms)
     except Exception as e:
         logger.error(f"Split error: {e}", exc_info=True)
@@ -774,8 +796,8 @@ async def _do_split(cb, bot, fm, usage, pdf_svc):
     finally:
         if inp: fm.cleanup(inp)
         if out_dir: fm.cleanup(out_dir)
+        if zip_path: fm.cleanup(zip_path)
         _pending.pop(uid, None)
-
 
 async def _do_protect(message, bot, fm, usage, data, password):
     uid = message.from_user.id
@@ -904,4 +926,5 @@ async def _do_resize_exact(message, bot, config, fm, usage, data, w, h):
         if inp: fm.cleanup(inp)
         if out: fm.cleanup(out)
         _pending.pop(uid, None)
+
 
