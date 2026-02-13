@@ -1,3 +1,5 @@
+import subprocess
+import shutil
 from pathlib import Path
 from docx import Document
 from app.config import logger
@@ -59,66 +61,46 @@ class DOCXService:
 
     @staticmethod
     async def to_pdf(input_path, output_path):
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import mm
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        from reportlab.lib import colors
+        input_path = Path(input_path)
+        output_path = Path(output_path)
 
-        doc = Document(str(input_path))
+        # LibreOffice outputs to a directory, not a specific file
+        out_dir = output_path.parent
 
-        pdf_doc = SimpleDocTemplate(
-            str(output_path),
-            pagesize=A4,
-            rightMargin=20 * mm,
-            leftMargin=20 * mm,
-            topMargin=20 * mm,
-            bottomMargin=20 * mm,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "libreoffice",
+                    "--headless",
+                    "--norestore",
+                    "--convert-to", "pdf",
+                    "--outdir", str(out_dir),
+                    str(input_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
 
-        styles = getSampleStyleSheet()
-        story = []
+            if result.returncode != 0:
+                logger.error(f"LibreOffice error: {result.stderr}")
+                raise Exception(f"Conversion failed: {result.stderr[:200]}")
 
-        for para in doc.paragraphs:
-            if para.text.strip():
-                style = styles["Normal"]
-                if para.style.name.startswith("Heading"):
-                    try:
-                        level = int(para.style.name[-1])
-                        if level <= 3:
-                            style = styles[f"Heading{level}"]
-                    except (ValueError, KeyError):
-                        style = styles["Heading1"]
-                story.append(Paragraph(para.text, style))
-                story.append(Spacer(1, 3 * mm))
+            # LibreOffice creates file with same name but .pdf extension
+            generated_pdf = out_dir / f"{input_path.stem}.pdf"
 
-        for table in doc.tables:
-            table_data = []
-            for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
-                table_data.append(row_data)
-            if table_data:
-                max_cols = max(len(r) for r in table_data)
-                for r in table_data:
-                    while len(r) < max_cols:
-                        r.append("")
-                t = Table(table_data)
-                t.setStyle(TableStyle([
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("PADDING", (0, 0), (-1, -1), 4),
-                ]))
-                story.append(t)
-                story.append(Spacer(1, 5 * mm))
+            if not generated_pdf.exists():
+                raise Exception("PDF file was not generated")
 
-        if not story:
-            story.append(Paragraph("Empty document", styles["Normal"]))
+            # Move to expected output path
+            if generated_pdf != output_path:
+                shutil.move(str(generated_pdf), str(output_path))
 
-        pdf_doc.build(story)
-        logger.info("DOCX converted to PDF")
-        return output_path
+            logger.info("DOCX converted to PDF via LibreOffice")
+            return output_path
+
+        except subprocess.TimeoutExpired:
+            raise Exception("Conversion timed out (120s limit)")
 
     @staticmethod
     async def get_info(input_path):
@@ -149,7 +131,6 @@ class DOCXService:
             "size_bytes": input_path.stat().st_size,
         }
 
-        # Count images
         image_count = 0
         for rel in doc.part.rels.values():
             if "image" in rel.reltype:
