@@ -65,7 +65,7 @@ def load_config():
         turso_token=turso_token,
         max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "20").strip()),
         temp_dir=os.getenv("TEMP_DIR", "tmp").strip(),
-        port=int(os.getenv("PORT", "10000").strip()),
+        port=int(os.getenv("PORT", "8000").strip()),
     )
 
     Path(config.temp_dir).mkdir(parents=True, exist_ok=True)
