@@ -2,6 +2,12 @@ import sqlite3
 from typing import Optional
 from datetime import date
 
+try:
+    import libsql
+    HAS_LIBSQL = True
+except ImportError:
+    HAS_LIBSQL = False
+
 from app.config import logger
 
 SCHEMA = [
@@ -40,12 +46,22 @@ class Database:
         self.conn = None
 
     async def connect(self):
-        # Using local sqlite3 instead of libsql for better compatibility
-        self.conn = sqlite3.connect("local.db")
+        # Use Turso if URL is provided and starts with libsql/https
+        if HAS_LIBSQL and self.url and (self.url.startswith("libsql://") or self.url.startswith("https://")):
+            try:
+                self.conn = libsql.connect("local.db", sync_url=self.url, auth_token=self.token)
+                self.conn.sync()
+                logger.info("Database ready (Turso synced)")
+            except Exception as e:
+                logger.error(f"Turso connection failed: {e}. Falling back to local SQLite.")
+                self.conn = sqlite3.connect("local.db")
+        else:
+            self.conn = sqlite3.connect("local.db")
+            logger.info("Database ready (Local SQLite3)")
+
         for stmt in SCHEMA:
             self.conn.execute(stmt)
         self.conn.commit()
-        logger.info("Database ready (SQLite3)")
 
     def fetch_one(self, query, params=()):
         cursor = self.conn.execute(query, params)
@@ -64,10 +80,18 @@ class Database:
     def execute(self, query, params=()):
         self.conn.execute(query, params)
         self.conn.commit()
+        # Only sync if using libsql
+        if HAS_LIBSQL and hasattr(self.conn, "sync"):
+            try:
+                self.conn.sync()
+            except Exception:
+                pass
 
     async def disconnect(self):
         try:
             if self.conn:
+                if HAS_LIBSQL and hasattr(self.conn, "sync"):
+                    self.conn.sync()
                 self.conn.close()
         except Exception:
             pass
