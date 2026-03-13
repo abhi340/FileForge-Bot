@@ -36,7 +36,7 @@ class BotConfig:
     turso_token: str = field(default="", repr=False)
     max_file_size_mb: int = 20
     temp_dir: str = "tmp"
-    port: int = 10000
+    port: int = 8000
     max_concurrent: int = 2
 
     @property
