@@ -46,18 +46,26 @@ class Database:
         self.conn = None
 
     async def connect(self):
+        # Ensure data directory exists if needed
+        if "/" in self.url or "\\" in self.url:
+            Path(self.url).parent.mkdir(parents=True, exist_ok=True)
+
         # Use Turso if URL is provided and starts with libsql/https
         if HAS_LIBSQL and self.url and (self.url.startswith("libsql://") or self.url.startswith("https://")):
             try:
+                # Use url as sync_url, but we need a local file for syncing
                 self.conn = libsql.connect("local.db", sync_url=self.url, auth_token=self.token)
-                self.conn.sync()
+                if hasattr(self.conn, "sync"):
+                    self.conn.sync()
                 logger.info("Database ready (Turso synced)")
             except Exception as e:
                 logger.error(f"Turso connection failed: {e}. Falling back to local SQLite.")
                 self.conn = sqlite3.connect("local.db")
         else:
-            self.conn = sqlite3.connect("local.db")
-            logger.info("Database ready (Local SQLite3)")
+            # If no Turso URL, use the provided url as a local path
+            db_path = self.url if self.url else "local.db"
+            self.conn = sqlite3.connect(db_path)
+            logger.info(f"Database ready (Local SQLite3: {db_path})")
 
         for stmt in SCHEMA:
             self.conn.execute(stmt)
